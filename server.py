@@ -304,6 +304,19 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     --high: #ef4444;
     --baseline: #60a5fa;
   }
+  :root.light-mode {
+    --bg: #f8f9fa;
+    --surface: #ffffff;
+    --border: #e5e7eb;
+    --accent: #10b981;
+    --text: #1f2937;
+    --muted: #6b7280;
+    --low: #10b981;
+    --moderate: #f59e0b;
+    --elevated: #f97316;
+    --high: #ef4444;
+    --baseline: #3b82f6;
+  }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body {
     background: var(--bg);
@@ -312,6 +325,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     min-height: 100vh;
     display: grid;
     grid-template-rows: auto 1fr;
+    transition: background 0.3s ease, color 0.3s ease;
   }
   header {
     padding: 1rem 2rem;
@@ -319,8 +333,29 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     display: flex;
     align-items: center;
     gap: 1rem;
+    background: var(--surface);
+    transition: background 0.3s ease, border-color 0.3s ease;
   }
-  .logo { font-size: 1.2rem; letter-spacing: 0.15em; color: var(--accent); }
+  .logo { font-size: 1.2rem; letter-spacing: 0.15em; color: var(--accent); transition: color 0.3s ease; }
+  .theme-toggle {
+    background: none;
+    border: 1px solid var(--border);
+    color: var(--text);
+    width: 36px;
+    height: 36px;
+    border-radius: 6px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1rem;
+    transition: background 0.2s, border-color 0.2s, color 0.2s;
+    padding: 0;
+  }
+  .theme-toggle:hover {
+    background: var(--border);
+    color: var(--accent);
+  }
   .status-dot {
     width: 8px; height: 8px; border-radius: 50%;
     background: var(--accent);
@@ -336,6 +371,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   #canvas-container {
     position: relative;
     background: radial-gradient(ellipse at center, #0d1117 0%, #0a0a0f 100%);
+    transition: background 0.3s ease;
+  }
+  :root.light-mode #canvas-container {
+    background: radial-gradient(ellipse at center, #f0f4f8 0%, #f8f9fa 100%);
   }
   canvas { display: block; width: 100%; height: 100%; }
   .sidebar {
@@ -345,6 +384,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     flex-direction: column;
     gap: 0;
     overflow-y: auto;
+    transition: background 0.3s ease, border-color 0.3s ease;
   }
   .panel {
     padding: 1.25rem;
@@ -490,6 +530,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div class="status-dot" id="statusDot"></div>
   <div class="logo">COGHEALTH</div>
   <div style="flex:1"></div>
+  <button class="theme-toggle" id="themeToggle" title="Toggle light/dark mode">🌙</button>
   <div style="font-size:0.7rem;color:var(--muted)" id="uptimeLabel">—</div>
 </header>
 <main>
@@ -573,8 +614,59 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 <script>
+// ── Theme Toggle ────────────────────────────────────────────────────────────
+function initTheme() {
+  const saved = localStorage.getItem('coghealth-theme');
+  const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+  const isDark = saved ? saved === 'dark' : prefersDark;
+  
+  if (!isDark) {
+    document.documentElement.classList.add('light-mode');
+    updateThemeButton();
+  }
+}
+
+function toggleTheme() {
+  const html = document.documentElement;
+  const isLight = html.classList.contains('light-mode');
+  
+  if (isLight) {
+    html.classList.remove('light-mode');
+    localStorage.setItem('coghealth-theme', 'dark');
+  } else {
+    html.classList.add('light-mode');
+    localStorage.setItem('coghealth-theme', 'light');
+  }
+  updateThemeButton();
+}
+
+function updateThemeButton() {
+  const btn = document.getElementById('themeToggle');
+  const isLight = document.documentElement.classList.contains('light-mode');
+  btn.textContent = isLight ? '☀️' : '🌙';
+}
+
+document.addEventListener('DOMContentLoaded', function() {
+  initTheme();
+  const btn = document.getElementById('themeToggle');
+  if (btn) btn.addEventListener('click', toggleTheme);
+});
+
+
 
 // ── Three.js Visualization ───────────────────────────────────────────────────
+// Update Three.js colors based on theme
+function getThemeColor(colorName) {
+  const isLight = document.documentElement.classList.contains('light-mode');
+  const colors = {
+    accent: isLight ? 0x10b981 : 0x6ee7b7,
+    baseline: isLight ? 0x3b82f6 : 0x60a5fa,
+    low: isLight ? 0x10b981 : 0x6ee7b7,
+  };
+  return colors[colorName] || 0x6ee7b7;
+}
+
+
 const canvas = document.getElementById('c');
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
 renderer.setPixelRatio(window.devicePixelRatio);
@@ -584,8 +676,9 @@ camera.position.set(0, 0, 4);
 
 // Icosahedron that morphs with stress level
 const geo = new THREE.IcosahedronGeometry(1.2, 4);
+const accentColor = getThemeColor('accent');
 const mat = new THREE.MeshPhongMaterial({
-  color: 0x6ee7b7,
+  color: accentColor,
   wireframe: false,
   shininess: 80,
   transparent: true,
@@ -596,7 +689,7 @@ scene.add(mesh);
 
 // Wireframe overlay
 const wireGeo = new THREE.IcosahedronGeometry(1.22, 4);
-const wireMat = new THREE.MeshBasicMaterial({ color: 0x6ee7b7, wireframe: true, transparent: true, opacity: 0.15 });
+const wireMat = new THREE.MeshBasicMaterial({ color: accentColor, wireframe: true, transparent: true, opacity: 0.15 });
 const wireMesh = new THREE.Mesh(wireGeo, wireMat);
 scene.add(wireMesh);
 
@@ -608,7 +701,7 @@ for (let i = 0; i < pCount * 3; i++) pPos[i] = (Math.random() - 0.5) * 12;
 particleGeo.setAttribute('position', new THREE.BufferAttribute(pPos, 3));
 const particles = new THREE.Points(
   particleGeo,
-  new THREE.PointsMaterial({ color: 0x6ee7b7, size: 0.03, transparent: true, opacity: 0.4 })
+  new THREE.PointsMaterial({ color: accentColor, size: 0.03, transparent: true, opacity: 0.4 })
 );
 scene.add(particles);
 
@@ -617,7 +710,7 @@ scene.add(new THREE.AmbientLight(0x333333));
 const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
 dirLight.position.set(5, 5, 5);
 scene.add(dirLight);
-const pointLight = new THREE.PointLight(0x6ee7b7, 1.5, 10);
+const pointLight = new THREE.PointLight(accentColor, 1.5, 10);
 pointLight.position.set(-3, 2, 3);
 scene.add(pointLight);
 
@@ -884,8 +977,12 @@ SUS_HTML = """<!DOCTYPE html>
 <title>System Usability Scale — CogHealth</title>
 <style>
 :root { --bg:#0a0a0f; --surface:#12121a; --border:#1e1e2e; --accent:#6ee7b7; --text:#e2e8f0; --muted:#64748b; }
+:root.light-mode { --bg:#f8f9fa; --surface:#ffffff; --border:#e5e7eb; --accent:#10b981; --text:#1f2937; --muted:#6b7280; }
 * { box-sizing:border-box; margin:0; padding:0; }
-body { background:var(--bg); color:var(--text); font-family:'JetBrains Mono',monospace; padding:2rem; max-width:700px; margin:0 auto; }
+body { background:var(--bg); color:var(--text); font-family:'JetBrains Mono',monospace; padding:2rem; max-width:700px; margin:0 auto; transition:background 0.3s ease,color 0.3s ease; }
+.header-row { display:flex; justify-content:space-between; align-items:center; margin-bottom:1rem; }
+.theme-toggle { background:none; border:1px solid var(--border); color:var(--text); width:36px; height:36px; border-radius:6px; cursor:pointer; font-size:1rem; transition:background 0.2s,border-color 0.2s,color 0.2s; padding:0; display:flex; align-items:center; justify-content:center; }
+.theme-toggle:hover { background:var(--border); color:var(--accent); }
 h1 { color:var(--accent); font-size:1.1rem; letter-spacing:0.15em; margin-bottom:0.5rem; }
 p.sub { color:var(--muted); font-size:0.75rem; margin-bottom:2rem; }
 .q { background:var(--surface); border:1px solid var(--border); border-radius:6px; padding:1rem; margin-bottom:1rem; }
@@ -895,13 +992,16 @@ p.sub { color:var(--muted); font-size:0.75rem; margin-bottom:2rem; }
 .scale label span { font-size:0.65rem; color:var(--muted); }
 input[type=radio] { accent-color:var(--accent); width:18px; height:18px; cursor:pointer; }
 input[type=text] { background:var(--bg); border:1px solid var(--border); color:var(--text); border-radius:4px; padding:0.5rem; font-family:inherit; font-size:0.8rem; width:100%; margin-bottom:1.5rem; }
-button { padding:0.8rem 2rem; border:1px solid var(--accent); background:transparent; color:var(--accent); border-radius:4px; cursor:pointer; font-family:inherit; font-size:0.8rem; letter-spacing:0.1em; text-transform:uppercase; }
+button { padding:0.8rem 2rem; border:1px solid var(--accent); background:transparent; color:var(--accent); border-radius:4px; cursor:pointer; font-family:inherit; font-size:0.8rem; letter-spacing:0.1em; text-transform:uppercase; transition:background 0.2s,color 0.2s; }
 button:hover { background:var(--accent); color:var(--bg); }
 .result { margin-top:1rem; padding:1rem; background:var(--surface); border-radius:6px; display:none; }
 </style>
 </head>
 <body>
-<h1>SYSTEM USABILITY SCALE</h1>
+<div class="header-row">
+  <h1>SYSTEM USABILITY SCALE</h1>
+  <button class="theme-toggle" id="themeToggle" title="Toggle light/dark mode">🌙</button>
+</div>
 <p class="sub">Please rate your experience with the CogHealth monitoring system.</p>
 <label style="font-size:0.75rem;color:var(--muted)">Participant ID</label>
 <input type="text" id="pid" placeholder="e.g. P1" style="margin-top:0.25rem">
@@ -909,6 +1009,38 @@ button:hover { background:var(--accent); color:var(--bg); }
 <button onclick="submitSUS()">Submit</button>
 <div class="result" id="result"></div>
 <script>
+// Theme Toggle
+function initTheme() {
+  const saved = localStorage.getItem('coghealth-theme');
+  const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+  const isDark = saved ? saved === 'dark' : prefersDark;
+  
+  if (!isDark) {
+    document.documentElement.classList.add('light-mode');
+    updateThemeButton();
+  }
+}
+
+function toggleTheme() {
+  const html = document.documentElement;
+  const isLight = html.classList.contains('light-mode');
+  
+  if (isLight) {
+    html.classList.remove('light-mode');
+    localStorage.setItem('coghealth-theme', 'dark');
+  } else {
+    html.classList.add('light-mode');
+    localStorage.setItem('coghealth-theme', 'light');
+  }
+  updateThemeButton();
+}
+
+function updateThemeButton() {
+  const btn = document.getElementById('themeToggle');
+  const isLight = document.documentElement.classList.contains('light-mode');
+  btn.textContent = isLight ? '☀️' : '🌙';
+}
+
 const questions = [
   "I think that I would like to use this system frequently.",
   "I found the system unnecessarily complex.",
@@ -954,6 +1086,12 @@ async function submitSUS() {
   res.innerHTML = `<strong style="color:var(--accent)">SUS Score: ${d.sus_score}</strong><br>
     <span style="font-size:0.75rem;color:var(--muted)">${d.sus_score >= 70 ? 'Good' : d.sus_score >= 50 ? 'Acceptable' : 'Below threshold'}</span>`;
 }
+
+document.addEventListener('DOMContentLoaded', function() {
+  initTheme();
+  const btn = document.getElementById('themeToggle');
+  if (btn) btn.addEventListener('click', toggleTheme);
+});
 </script>
 </body>
 </html>"""
