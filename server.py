@@ -674,8 +674,23 @@ const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(60, 1, 0.1, 100);
 camera.position.set(0, 0, 4);
 
-// Icosahedron that morphs with stress level
-const geo = new THREE.IcosahedronGeometry(1.2, 4);
+// ── Leaf Geometry ────────────────────────────────────────────────────────────
+function createLeafGeometry() {
+  const shape = new THREE.Shape();
+  shape.moveTo(0, 0);
+  shape.bezierCurveTo(0.5, 0.5, 1, 1.5, 0, 3);
+  shape.bezierCurveTo(-1, 1.5, -0.5, 0.5, 0, 0);
+  
+  const extrudeSettings = { depth: 0.1, bevelEnabled: true, bevelSegments: 2, steps: 2, bevelSize: 0.1, bevelThickness: 0.1 };
+  const geometry = new THREE.ExtrudeGeometry(shape, extrudeSettings);
+  geometry.center();
+  geometry.scale(0.8, 0.8, 0.8);
+  return geometry;
+}
+
+const leafGeo = createLeafGeometry();
+const ballGeo = new THREE.IcosahedronGeometry(1.2, 4);
+
 const accentColor = getThemeColor('accent');
 const mat = new THREE.MeshPhongMaterial({
   color: accentColor,
@@ -684,13 +699,12 @@ const mat = new THREE.MeshPhongMaterial({
   transparent: true,
   opacity: 0.85,
 });
-const mesh = new THREE.Mesh(geo, mat);
+const mesh = new THREE.Mesh(leafGeo, mat);
 scene.add(mesh);
 
 // Wireframe overlay
-const wireGeo = new THREE.IcosahedronGeometry(1.22, 4);
 const wireMat = new THREE.MeshBasicMaterial({ color: accentColor, wireframe: true, transparent: true, opacity: 0.15 });
-const wireMesh = new THREE.Mesh(wireGeo, wireMat);
+const wireMesh = new THREE.Mesh(leafGeo, wireMat);
 scene.add(wireMesh);
 
 // Particle field
@@ -714,9 +728,9 @@ const pointLight = new THREE.PointLight(accentColor, 1.5, 10);
 pointLight.position.set(-3, 2, 3);
 scene.add(pointLight);
 
-// Store original vertex positions for morphing
-const posAttr = geo.attributes.position;
-const origPos = posAttr.array.slice();
+// Store original vertex positions for ball morphing
+const ballPosAttr = ballGeo.attributes.position;
+const ballOrigPos = ballPosAttr.array.slice();
 
 let targetScore = 0;
 let currentScore = 0;
@@ -748,23 +762,53 @@ function animate() {
   // Interpolate score
   currentScore += (targetScore - currentScore) * 0.05;
 
-  // Morph geometry with score (Perlin-like noise via sin)
-  const distort = 0.15 + currentScore * 0.55;
-  const speed   = 0.5 + currentScore * 2.0;
-  for (let i = 0; i < posAttr.count; i++) {
-    const ix = i * 3, iy = ix + 1, iz = ix + 2;
-    const ox = origPos[ix], oy = origPos[iy], oz = origPos[iz];
-    const len = Math.sqrt(ox*ox + oy*oy + oz*oz);
-    const n = Math.sin(ox * 2.1 + t * speed) *
-              Math.cos(oy * 1.9 + t * speed * 0.7) *
-              Math.sin(oz * 2.3 + t * speed * 1.3);
-    const scale = 1 + n * distort;
-    posAttr.array[ix] = ox * scale / len;
-    posAttr.array[iy] = oy * scale / len;
-    posAttr.array[iz] = oz * scale / len;
+  // ── Geometry Transition ─────────────────────────────────────────────────
+  // Switch geometry based on stress score (threshold 0.4)
+  const transitionThreshold = 0.4;
+  if (currentScore < transitionThreshold && mesh.geometry !== leafGeo) {
+    mesh.geometry = leafGeo;
+    wireMesh.geometry = leafGeo;
+  } else if (currentScore >= transitionThreshold && mesh.geometry !== ballGeo) {
+    mesh.geometry = ballGeo;
+    wireMesh.geometry = ballGeo;
   }
-  posAttr.needsUpdate = true;
-  geo.computeVertexNormals();
+
+  if (currentScore < transitionThreshold) {
+    // Leaf animation: gentle swaying
+    const sway = Math.sin(t * 1.5) * 0.15;
+    mesh.rotation.z = sway;
+    mesh.rotation.x = Math.PI / 6 + Math.cos(t) * 0.1;
+    mesh.rotation.y = t * 0.2;
+    
+    // Pulse scale slightly
+    const s = 1 + Math.sin(t * 2) * 0.03;
+    mesh.scale.set(s, s, s);
+  } else {
+    // Ball animation: rapid stretching (current behavior)
+    const ballScore = (currentScore - transitionThreshold) / (1 - transitionThreshold);
+    const distort = 0.15 + ballScore * 0.55;
+    const speed   = 0.5 + ballScore * 2.0;
+    const posAttr = ballGeo.attributes.position;
+    
+    for (let i = 0; i < posAttr.count; i++) {
+      const ix = i * 3, iy = ix + 1, iz = ix + 2;
+      const ox = ballOrigPos[ix], oy = ballOrigPos[iy], oz = ballOrigPos[iz];
+      const len = Math.sqrt(ox*ox + oy*oy + oz*oz);
+      const n = Math.sin(ox * 2.1 + t * speed) *
+                Math.cos(oy * 1.9 + t * speed * 0.7) *
+                Math.sin(oz * 2.3 + t * speed * 1.3);
+      const scale = 1 + n * distort;
+      posAttr.array[ix] = ox * scale / len;
+      posAttr.array[iy] = oy * scale / len;
+      posAttr.array[iz] = oz * scale / len;
+    }
+    posAttr.needsUpdate = true;
+    ballGeo.computeVertexNormals();
+    
+    mesh.rotation.x += 0.003 + ballScore * 0.008;
+    mesh.rotation.y += 0.005 + ballScore * 0.012;
+    mesh.scale.set(1, 1, 1);
+  }
 
   // Color interpolation
   currentColor.lerp(targetColor, 0.03);
@@ -772,10 +816,8 @@ function animate() {
   wireMat.color.copy(currentColor);
   pointLight.color.copy(currentColor);
 
-  // Rotation
-  mesh.rotation.x += 0.003 + currentScore * 0.008;
-  mesh.rotation.y += 0.005 + currentScore * 0.012;
   wireMesh.rotation.copy(mesh.rotation);
+  wireMesh.scale.copy(mesh.scale);
 
   // Particles drift
   particles.rotation.y += 0.0008;
