@@ -11,6 +11,8 @@ import json
 import logging
 import sqlite3
 import time
+import threading
+import numpy as np
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional
@@ -27,14 +29,18 @@ from config import (
     SELF_REPORT_DB,
     STATIC_DIR,
     TEMPLATES_DIR,
+    RAW_DIR,
+    RAW_RETENTION_SECONDS,
+    FEATURE_NAMES
 )
+from features import RollingNormalizer, SequenceBuilder, extract_features, save_feature_vector
 
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__, static_folder=str(STATIC_DIR), template_folder=str(TEMPLATES_DIR))
 app.secret_key = SECRET_KEY
 
-# ─── Shared State (written by orchestrator, read by server) ──────────────────
+# ─── Shared State ─────────────────────────────────────────────────────────────
 
 _state: dict = {
     "stress_score":  0.0,
@@ -47,10 +53,84 @@ _state: dict = {
     "calibrated":    False,
 }
 
+# Web-native inference components
+normalizer  = RollingNormalizer()
+seq_builder = SequenceBuilder(5) # SEQUENCE_LENGTH
+smoothed_score = 0.0
+start_ts = time.time()
+
 def update_state(new_state: dict) -> None:
-    """Called by orchestrator thread to push new inference results."""
     global _state
     _state = {**_state, **new_state, "ts": time.time()}
+
+def run_inference(sequence: np.ndarray) -> dict:
+    global smoothed_score
+    latest = sequence[-1]
+    
+    # Feature indices based on FEATURE_NAMES
+    typing_speed  = float(latest[0])
+    dwell_std     = float(latest[2])
+    flight_std    = float(latest[4])
+    error_rate    = float(latest[5])
+    rhythm_cv     = float(latest[9])
+    mouse_spd_std = float(latest[11])
+    mouse_acc     = float(latest[12])
+    idle_ratio    = float(latest[16])
+    path_eff      = float(latest[17])
+
+    speed_stress  = max(0.0, min(1.0,  typing_speed * 0.4 + 0.2))
+    error_stress  = max(0.0, min(1.0,  abs(error_rate) * 0.5 + abs(dwell_std) * 0.3))
+    rhythm_stress = max(0.0, min(1.0,  abs(rhythm_cv)  * 0.4 + abs(flight_std) * 0.3))
+    mouse_stress  = max(0.0, min(1.0,  abs(mouse_spd_std) * 0.3 + abs(mouse_acc) * 0.2 +
+                                       (1.0 - min(1.0, max(0.0, path_eff + 1.0) / 2.0)) * 0.3))
+    calm_penalty  = min(0.3, max(0.0, idle_ratio * 0.4))
+
+    raw_score = (speed_stress * 0.30 + error_stress * 0.25 + rhythm_stress * 0.25 + mouse_stress * 0.20 - calm_penalty)
+    raw_score = max(0.0, min(1.0, raw_score))
+    smoothed_score = 0.5 * raw_score + 0.5 * smoothed_score
+    
+    if   smoothed_score < 0.45: level = "low"
+    elif smoothed_score < 0.55: level = "moderate"
+    elif smoothed_score < 0.80: level = "elevated"
+    else:                       level = "high"
+
+    return {
+        "smoothed_score": round(smoothed_score, 4),
+        "stress_level":   level,
+        "is_anomaly":     smoothed_score > 0.55,
+    }
+
+def inference_worker():
+    """Background thread to process features and update state."""
+    logger.info("Inference worker started")
+    while True:
+        try:
+            time.sleep(10)
+            end_ts = time.time()
+            raw = extract_features(end_ts - 60, end_ts)
+            if raw is None: continue
+            
+            normalizer.update(end_ts, raw)
+            norm = normalizer.transform(raw)
+            save_feature_vector(end_ts, raw, norm)
+            seq_builder.push(norm)
+            
+            seq = seq_builder.get_sequence()
+            if seq is None: continue
+            
+            result = run_inference(seq)
+            feat_dict = {name: round(float(norm[i]), 4) for i, name in enumerate(FEATURE_NAMES)}
+            
+            update_state({
+                "stress_score":  result["smoothed_score"],
+                "stress_level":  result["stress_level"],
+                "is_anomaly":    result["is_anomaly"],
+                "uptime_s":      int(time.time() - start_ts),
+                "features":      feat_dict,
+                "calibrated":    True,
+            })
+        except Exception as e:
+            logger.error(f"Inference error: {e}")
 
 
 # ─── Database ─────────────────────────────────────────────────────────────────
@@ -226,6 +306,33 @@ def api_latency():
         conn.commit()
     return jsonify({"status": "ok"})
 
+
+@app.route("/api/ingest", methods=["POST"])
+def api_ingest():
+    """
+    POST /api/ingest
+    Receives web-native behavioral events and stores them in temporary JSONL files.
+    """
+    data = request.get_json(force=True, silent=True) or {}
+    events = data.get("events", [])
+    if not events:
+        return jsonify({"status": "empty"}), 200
+
+    ts_now = time.time()
+    expires = ts_now + RAW_RETENTION_SECONDS
+    filename = RAW_DIR / f"web_{int(ts_now * 1000)}.jsonl"
+    
+    meta = {"_meta": True, "created_ts": ts_now, "expires_ts": expires, "event_count": len(events)}
+    
+    try:
+        with open(filename, "w") as fh:
+            fh.write(json.dumps(meta) + "\n")
+            for ev in events:
+                fh.write(json.dumps(ev) + "\n")
+        return jsonify({"status": "ok", "count": len(events)})
+    except Exception as e:
+        logger.error(f"Ingest failed: {e}")
+        return jsonify({"error": "storage failed"}), 500
 
 @app.route("/api/analytics")
 def api_analytics():
@@ -645,6 +752,84 @@ function updateThemeButton() {
   const isLight = document.documentElement.classList.contains('light-mode');
   btn.textContent = isLight ? '☀️' : '🌙';
 }
+
+// ── Web-Native Behavioral Collector ──────────────────────────────────────────
+const eventBuffer = [];
+const pressTimes = new Map();
+
+function getCategory(key) {
+  const cats = {
+    'Backspace': 'backspace', 'Enter': 'enter', ' ': 'space', 'Tab': 'tab',
+    'Shift': 'modifier', 'Control': 'modifier', 'Alt': 'modifier', 'Meta': 'modifier'
+  };
+  return cats[key] || (key.length === 1 ? 'alpha' : 'special');
+}
+
+function logEvent(event) {
+  eventBuffer.push(event);
+  if (eventBuffer.length > 500) eventBuffer.shift();
+}
+
+window.addEventListener('keydown', (e) => {
+  const ts = Date.now() / 1000;
+  const cat = getCategory(e.key);
+  pressTimes.set(e.key, ts);
+  logEvent({ type: 'key_press', ts, cat });
+});
+
+window.addEventListener('keyup', (e) => {
+  const ts = Date.now() / 1000;
+  const cat = getCategory(e.key);
+  const pressTs = pressTimes.get(e.key);
+  const dwell = pressTs ? Number((ts - pressTs).toFixed(6)) : null;
+  pressTimes.delete(e.key);
+  logEvent({ type: 'key_release', ts, cat, dwell });
+});
+
+let lastMoveTs = 0;
+let lastPos = null;
+window.addEventListener('mousemove', (e) => {
+  const ts = Date.now() / 1000;
+  if (ts - lastMoveTs < 0.05) return; // throttle 50ms
+  
+  const x = e.clientX, y = e.clientY;
+  if (lastPos) {
+    const dx = x - lastPos.x, dy = y - lastPos.y;
+    const dist = Math.sqrt(dx*dx + dy*dy);
+    const dt = ts - lastMoveTs;
+    logEvent({
+      type: 'mouse_move', ts, x, y, dx, dy,
+      dist: Number(dist.toFixed(2)),
+      speed: Number((dist/dt).toFixed(2)),
+      dt: Number(dt.toFixed(6))
+    });
+  }
+  lastPos = {x, y};
+  lastMoveTs = ts;
+});
+
+window.addEventListener('mousedown', (e) => {
+  logEvent({ type: 'mouse_click', ts: Date.now()/1000, btn: e.button === 0 ? 'left' : 'right', pressed: true });
+});
+
+window.addEventListener('wheel', (e) => {
+  logEvent({ type: 'mouse_scroll', ts: Date.now()/1000, dy: e.deltaY, magnitude: Math.abs(e.deltaY) });
+});
+
+async function flushEvents() {
+  if (eventBuffer.length === 0) return;
+  const events = [...eventBuffer];
+  eventBuffer.length = 0;
+  try {
+    await fetch('/api/ingest', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ events })
+    });
+  } catch (e) { console.warn('Flush failed', e); }
+}
+
+setInterval(flushEvents, 5000);
 
 document.addEventListener('DOMContentLoaded', function() {
   initTheme();
@@ -1123,5 +1308,14 @@ def server_error(e):
 
 def run_server() -> None:
     init_db()
+    # Start background inference worker
+    threading.Thread(target=inference_worker, daemon=True).start()
     logger.info("Flask server on %s:%d", FLASK_HOST, FLASK_PORT)
     app.run(host=FLASK_HOST, port=FLASK_PORT, debug=False, use_reloader=False)
+
+if __name__ == "__main__":
+    run_server()
+else:
+    # This path is for gunicorn
+    init_db()
+    threading.Thread(target=inference_worker, daemon=True).start()
