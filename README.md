@@ -1,9 +1,9 @@
 # CogHealth Monitor
 
 [https://hess125.github.io/final_project/]
-* Project documentation website *
+*Project documentation website*
 [ A deployed web demo: https://final-project-msxv.onrender.com/ ]
-* This is a deployed version of the system for viewers to see what it is like before installation * 
+*This is a deployed version of the system for viewers to see what it is like before installation*
 
 “It’s not stress that kills us; it is our reaction to it.” – Hans Selye
 
